@@ -2388,6 +2388,39 @@ function isClaudeRootTurnFrame(message: SDKMessage): boolean {
   );
 }
 
+function readClaudeRootModel(message: SDKMessage): string | null {
+  let model: string;
+
+  // Auxiliary modelUsage entries and native child frames do not identify the root model.
+  switch (message.type) {
+    case "system":
+      if (message.subtype !== "init") return null;
+
+      model = message.model;
+      break;
+    case "assistant":
+      if (message.parent_tool_use_id != null) return null;
+
+      model = message.message.model;
+      break;
+    case "stream_event":
+      if (message.parent_tool_use_id != null || message.event.type !== "message_start") {
+        return null;
+      }
+
+      model = message.event.message.model;
+      break;
+    default:
+      return null;
+  }
+
+  // Some SDK frames omit model despite its required SDK type or use a synthetic placeholder.
+  if (typeof model !== "string") return null;
+
+  const observedModel = model.trim();
+  return observedModel.length > 0 && !observedModel.startsWith("<") ? observedModel : null;
+}
+
 function claudePendingBackgroundTasksFromRoster(
   roster: ReadonlyMap<string, OrchestrationV2PendingBackgroundTask>,
 ): ReadonlyArray<OrchestrationV2PendingBackgroundTask> {
@@ -3302,6 +3335,7 @@ interface ActiveClaudeTurnContext {
   readonly input: ProviderAdapter.ProviderAdapterV2TurnInput;
   readonly nativeThreadId: string;
   readonly nativeTurnId: string;
+  observedModel: string | null;
   nativeMessageCursor: string | null;
   readonly providerTurnId: OrchestrationV2ProviderTurn["id"];
   readonly providerTurnOrdinal: number;
@@ -3400,6 +3434,7 @@ interface ClaudeLiveQueryContext {
   readonly nativeThreadId: string;
   readonly query: ClaudeAgentSdkQuerySession;
   readonly queryPolicyKey: string;
+  observedModel: string | null;
   selection: CompiledClaudeModelSelection;
   readonly closed: Deferred.Deferred<void, never>;
   lastTurn: ActiveClaudeTurnContext | null;
@@ -4240,6 +4275,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               startedAt: context.startedAt,
               completedAt: null,
               tokenUsage,
+              ...(context.observedModel === null ? {} : { observedModel: context.observedModel }),
             },
           });
         });
@@ -4709,6 +4745,9 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           status: input.status,
           startedAt: input.context.startedAt,
           completedAt: input.completedAt,
+          ...(input.context.observedModel === null
+            ? {}
+            : { observedModel: input.context.observedModel }),
         });
 
         const buildToolCallArtifacts = (input: {
@@ -7312,6 +7351,19 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           }
 
           const message = input.message;
+          const observedModel = readClaudeRootModel(message);
+          if (message.type === "system" && message.subtype === "init" && observedModel !== null) {
+            yield* emitProviderEvent({
+              type: "provider_session.updated",
+              driver: CLAUDE_PROVIDER,
+              providerSession: {
+                ...session,
+                model: observedModel,
+                updatedAt: yield* DateTime.now,
+              },
+            });
+          }
+
           // Before any routing: a Monitor started during an idle wake turn
           // reports its task before the drain replays the tool call.
           yield* trackClaudeMonitorCalls(message);
@@ -7467,6 +7519,32 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               yield* bufferWakeMessage({ nativeThreadId: liveQuery.nativeThreadId, message });
             }
             return;
+          }
+          if (observedModel !== null) {
+            liveQuery.observedModel = observedModel;
+            if (context.observedModel !== observedModel) {
+              context.observedModel = observedModel;
+              yield* emitProviderEvent({
+                type: "provider_turn.updated",
+                driver: CLAUDE_PROVIDER,
+                providerTurn: providerTurnPayload({
+                  context,
+                  status: "running",
+                  completedAt: null,
+                }),
+              });
+              if (!isClaudeTurnStartMessage(message)) {
+                yield* emitProviderEvent({
+                  type: "provider_session.updated",
+                  driver: CLAUDE_PROVIDER,
+                  providerSession: {
+                    ...session,
+                    model: observedModel,
+                    updatedAt: yield* DateTime.now,
+                  },
+                });
+              }
+            }
           }
           yield* trackClaudeGoal({ nativeThreadId: liveQuery.nativeThreadId, context, message });
 
@@ -9081,6 +9159,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               ),
             );
             live.selection = compiledSelection;
+            live.observedModel = null;
           }
           if (
             existing !== null &&
@@ -9211,6 +9290,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             nativeThreadId,
             query: querySession,
             queryPolicyKey,
+            observedModel: null,
             selection: compiledSelection,
             closed,
             lastTurn: null,
@@ -9238,6 +9318,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                     context.openedPermissionMode =
                       message.permissionMode ?? context.openedPermissionMode;
                     context.receivedInit = true;
+                    context.observedModel = readClaudeRootModel(message);
                   }
                   if (
                     message.type === "system" &&
@@ -9349,6 +9430,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               queryPolicy: querySession.queryPolicy,
               nativeThreadId,
               nativeTurnId,
+              observedModel: querySession.observedModel,
               nativeMessageCursor: null,
               providerTurnId,
               providerTurnOrdinal,

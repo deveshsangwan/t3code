@@ -252,7 +252,12 @@ export function applyOrchestrationV2ProjectionEvent(
       return { ...projection, thread: event.payload };
     case "run.created":
     case "run.updated": {
-      const next = { ...base, runs: upsertEntity(base.runs, event.payload) };
+      const current = base.runs.find((run) => run.id === event.payload.id);
+      const payload =
+        event.payload.observedModel === undefined && current?.observedModel !== undefined
+          ? { ...event.payload, observedModel: current.observedModel }
+          : event.payload;
+      const next = { ...base, runs: upsertEntity(base.runs, payload) };
       return { ...next, visibleTurnItems: activeVisibleTurnItems(next) };
     }
     case "run.background-work-cancelled":
@@ -291,22 +296,20 @@ export function applyOrchestrationV2ProjectionEvent(
       };
     case "provider-thread.updated":
       return { ...base, providerThreads: upsertEntity(base.providerThreads, event.payload) };
-    case "provider-turn.updated":
+    case "provider-turn.updated": {
+      const current = base.providerTurns.find((turn) => turn.id === event.payload.id);
+      const observedModel = event.payload.observedModel ?? current?.observedModel;
+      const tokenUsage = event.payload.tokenUsage ?? current?.tokenUsage;
+
       return {
         ...base,
         providerTurns: upsertEntity(base.providerTurns, {
           ...event.payload,
-          ...((event.payload.tokenUsage ??
-            base.providerTurns.find((turn) => turn.id === event.payload.id)?.tokenUsage) ===
-          undefined
-            ? {}
-            : {
-                tokenUsage:
-                  event.payload.tokenUsage ??
-                  base.providerTurns.find((turn) => turn.id === event.payload.id)?.tokenUsage,
-              }),
+          ...(observedModel === undefined ? {} : { observedModel }),
+          ...(tokenUsage === undefined ? {} : { tokenUsage }),
         }),
       };
+    }
     case "runtime-request.updated":
       return { ...base, runtimeRequests: upsertEntity(base.runtimeRequests, event.payload) };
     case "message.updated":

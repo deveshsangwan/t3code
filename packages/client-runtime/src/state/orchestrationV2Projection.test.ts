@@ -5,6 +5,7 @@ import {
   type OrchestrationV2Run,
   type OrchestrationV2ThreadProjection,
   type OrchestrationV2TurnItem,
+  EventId,
   MessageId,
   ProjectId,
   ProviderInstanceId,
@@ -134,6 +135,24 @@ describe("applyOrchestrationV2ProjectionEvent", () => {
     expect(next?.thread.pullRequests?.[0]).toBe(links[0]);
   });
 
+  it("keeps observed execution provenance when a completion snapshot omits it", () => {
+    const projection = {
+      ...emptyProjection,
+      runs: [{ ...run, observedModel: "claude-sonnet-5-5" }],
+    };
+    const next = applyOrchestrationV2ProjectionEvent(projection, {
+      id: EventId.make("event-run-provenance"),
+      type: "run.updated",
+      threadId,
+      runId,
+      occurredAt: now,
+      payload: run,
+    });
+
+    expect(next?.runs[0]?.observedModel).toBe("claude-sonnet-5-5");
+    expect(next?.runs[0]?.modelSelection).toEqual(run.modelSelection);
+  });
+
   it("keeps live token usage when the terminal provider turn omits it", () => {
     const providerTurnId = ProviderTurnId.make("provider-turn-reducer");
     const running = {
@@ -146,6 +165,7 @@ describe("applyOrchestrationV2ProjectionEvent", () => {
       status: "running" as const,
       startedAt: now,
       completedAt: null,
+      observedModel: "claude-sonnet-5-5",
       tokenUsage: {
         usedTokens: 50_000,
         maxTokens: 200_000,
@@ -164,12 +184,14 @@ describe("applyOrchestrationV2ProjectionEvent", () => {
         status: "completed",
         completedAt: now,
         tokenUsage: undefined,
+        observedModel: undefined,
       },
     } as OrchestrationV2DomainEvent;
 
     const next = applyOrchestrationV2ProjectionEvent(projection, event);
 
     expect(next?.providerTurns[0]?.status).toBe("completed");
+    expect(next?.providerTurns[0]?.observedModel).toBe("claude-sonnet-5-5");
     expect(next?.providerTurns[0]?.tokenUsage).toEqual(running.tokenUsage);
   });
 

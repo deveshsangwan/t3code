@@ -7,6 +7,8 @@ import {
   NodeId,
   OrchestratorMcpTarget,
   type OrchestrationV2ThreadShell,
+  type OrchestrationV2Run,
+  type OrchestrationV2Subagent,
   type ScheduledTask,
   ScheduledTaskId,
   ProjectId,
@@ -2096,6 +2098,94 @@ describe("OrchestratorMcpService provider resolution", () => {
       }),
     );
   });
+  it.effect("reports observed fallback separately from requested child configuration", () =>
+    Effect.gen(function* () {
+      const runSelection = {
+        instanceId: ProviderInstanceId.make("claudeAgent-personal"),
+        model: "claude-opus-5-5",
+        options: [
+          { id: "effort", value: "max" },
+          { id: "fastMode", value: true },
+        ],
+      } as const;
+      const threadSelection = {
+        instanceId: codexInstanceId,
+        model: "gpt-5.4",
+        options: [{ id: "reasoningEffort", value: "high" }],
+      } as const;
+      const child = idleThreadProjection(liveThreadShell(childThreadId));
+      const run = {
+        id: RunId.make("run:mcp-restarted-child"),
+        threadId: childThreadId,
+        ordinal: 1,
+        providerInstanceId: runSelection.instanceId,
+        modelSelection: runSelection,
+        observedModel: "claude-sonnet-5-5",
+        providerThreadId: null,
+        userMessageId: MessageId.make("message:mcp-restarted-child"),
+        rootNodeId: null,
+        activeAttemptId: null,
+        status: "running",
+        requestedAt: child.updatedAt,
+        startedAt: child.updatedAt,
+        completedAt: null,
+        checkpointId: null,
+        contextHandoffId: null,
+      } satisfies OrchestrationV2Run;
+      const task = {
+        id: taskId,
+        threadId: parentThreadId,
+        parentNodeId,
+        runId: null,
+        origin: "app_owned",
+        createdBy: "agent",
+        driver: ProviderDriverKind.make("claudeAgent"),
+        childThreadId,
+        providerThreadId: null,
+        nativeTaskRef: null,
+        prompt: "Review the implementation.",
+        title: null,
+        providerInstanceId: ProviderInstanceId.make("claudeAgent-work"),
+        model: "claude-sonnet-4-6",
+        status: "running",
+        result: null,
+        startedAt: child.updatedAt,
+        completedAt: null,
+        updatedAt: child.updatedAt,
+      } satisfies OrchestrationV2Subagent;
+      const parent = {
+        ...idleThreadProjection(liveThreadShell(parentThreadId)),
+        subagents: [task],
+      };
+      const childWithRun = {
+        ...child,
+        thread: { ...child.thread, modelSelection: threadSelection },
+        runs: [run],
+      };
+      const dependencies = Layer.mergeAll(
+        NodeServices.layer,
+        Layer.mock(ThreadManagementService.ThreadManagementService)({
+          getThreadRecords: (id) => Effect.succeed(id === parentThreadId ? parent : childWithRun),
+        }),
+        ServerSettings.layerTest(),
+        providerRegistryLayer([]),
+        adapterRegistryLayer([]),
+        Layer.mock(ProjectService.ProjectService)({}),
+        Layer.mock(SecretRequests.SecretRequests)({}),
+        Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+      );
+      yield* Effect.gen(function* () {
+        const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+        const result = yield* service.taskStatus(scope, taskId);
+
+        assert.equal(result.providerInstanceId, runSelection.instanceId);
+        assert.equal(result.model, run.observedModel);
+        assert.equal(result.requestedModel, runSelection.model);
+        assert.equal(result.observedModel, run.observedModel);
+        assert.deepEqual(result.options, runSelection.options);
+      }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(dependencies))));
+    }),
+  );
   it.effect(
     "reports the child run's selection after a restart and the thread selection before launch",
     () =>

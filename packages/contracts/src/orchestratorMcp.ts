@@ -209,6 +209,8 @@ export const OrchestratorMcpDelegateTaskResult = Schema.Struct({
   latestTerminalResultContextTransferId: Schema.NullOr(ContextTransferId),
   providerInstanceId: ProviderInstanceId,
   model: Schema.NullOr(Schema.String),
+  requestedModel: Schema.optional(Schema.String),
+  observedModel: Schema.optional(Schema.String),
   options: Schema.optional(
     Schema.Array(ProviderOptionSelection).annotate({
       description:
@@ -390,6 +392,8 @@ export const OrchestratorMcpThreadDetail = Schema.Struct({
   activeRunId: Schema.NullOr(RunId),
   providerInstanceId: ProviderInstanceId,
   model: Schema.String,
+  requestedModel: Schema.optional(Schema.String),
+  observedModel: Schema.optional(Schema.String),
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
   linkedPullRequest: Schema.NullOr(ThreadLinkedPullRequest),
@@ -419,6 +423,8 @@ export const OrchestratorMcpThreadRun = Schema.Struct({
   status: OrchestrationV2RunStatus,
   providerInstanceId: ProviderInstanceId,
   model: Schema.String,
+  requestedModel: Schema.optional(Schema.String),
+  observedModel: Schema.optional(Schema.String),
   requestedAt: IsoDateTime,
   startedAt: Schema.NullOr(IsoDateTime),
   completedAt: Schema.NullOr(IsoDateTime),

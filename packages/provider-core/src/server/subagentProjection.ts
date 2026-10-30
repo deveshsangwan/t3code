@@ -213,7 +213,10 @@ export function subagentResultForRun(
       ? "Child task completed without an assistant result."
       : `Child task ended with status ${run.status}.`);
   return {
-    text,
+    text:
+      run.observedModel !== undefined && run.observedModel !== run.modelSelection.model
+        ? `Requested model: ${run.modelSelection.model}. Provider-reported model: ${run.observedModel}.\n\n${text}`
+        : text,
     messageId: failure === undefined ? (message?.id ?? turnItem?.messageId ?? null) : null,
     turnItemId: failure?.id ?? turnItem?.id ?? null,
   };

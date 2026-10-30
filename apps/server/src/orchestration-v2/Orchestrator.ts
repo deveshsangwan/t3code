@@ -10729,6 +10729,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const updatedTask: OrchestrationV2Subagent = {
         ...task,
         providerThreadId: childRun.providerThreadId,
+        model: childRun.observedModel ?? task.model,
         status: terminalStatus,
         result: result.text,
         completedAt: now,

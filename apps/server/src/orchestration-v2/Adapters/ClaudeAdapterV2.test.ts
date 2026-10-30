@@ -30,6 +30,7 @@ import {
   ChatImageAttachment,
   CheckpointId,
   ClaudeSettings,
+  type OrchestrationV2Subagent,
   EnvironmentId,
   MessageId,
   type ModelSelection,
@@ -72,6 +73,17 @@ import * as HostProcess from "@t3tools/shared/HostProcess";
 import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 import { SpawnExecutableResolution } from "@t3tools/shared/shell";
 
+import * as OrchestratorMcpService from "../../mcp/OrchestratorMcpService.ts";
+import * as ThreadManagementService from "../ThreadManagementService.ts";
+import * as ThreadLaunchService from "../ThreadLaunchService.ts";
+import * as GitVcsDriver from "../../vcs/GitVcsDriver.ts";
+import * as ProviderAdapterRegistry from "../ProviderAdapterRegistry.ts";
+import * as ProviderRegistry from "../../provider/ProviderRegistry.ts";
+import * as ProjectService from "../../project/ProjectService.ts";
+import * as SecretRequests from "../../secrets/SecretRequests.ts";
+import * as ScheduledTaskService from "../../scheduledTasks/ScheduledTaskService.ts";
+import * as ServerSettings from "../../serverSettings.ts";
+
 import { attachmentRelativePath } from "../../attachmentStore.ts";
 import { WorkflowAgentTranscriptReadObserver } from "../workflowAgentTranscript.ts";
 import * as ServerConfig from "../../config.ts";
@@ -91,6 +103,7 @@ import type * as ProviderContinuationRequests from "@t3tools/provider-core/serve
 import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 import * as ClaudeAdapterV2 from "./ClaudeAdapterV2.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+import { subagentResultForRun } from "@t3tools/provider-core/server/subagentProjection";
 import { ClaudeOrchestratorReplayHarness } from "./ClaudeAdapterV2.testkit.ts";
 import { provideDeterministicTestRuntime } from "../testkit/DeterministicRuntime.ts";
 import { runOrchestratorV2Scenario } from "../testkit/OrchestratorScenario.ts";
@@ -5560,6 +5573,227 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     input,
     output: { success, taskId: input.taskId, updatedFields: ["status"] },
   });
+
+  it.effect.each([
+    { sdkModel: "claude-sonnet-5-5", expectedObservedModel: "claude-sonnet-5-5" },
+    { sdkModel: "claude-opus-5-5", expectedObservedModel: "claude-opus-5-5" },
+    { sdkModel: "custom-provider-model", expectedObservedModel: "custom-provider-model" },
+    { sdkModel: " claude-sonnet-5-5 ", expectedObservedModel: "claude-sonnet-5-5" },
+    { sdkModel: "<synthetic>", expectedObservedModel: undefined },
+    { sdkModel: "", expectedObservedModel: undefined },
+    { sdkModel: undefined, expectedObservedModel: undefined },
+  ])(
+    "reports root model $sdkModel without changing requested selection",
+    ({ sdkModel, expectedObservedModel }) =>
+      Effect.gen(function* () {
+        let sequence = 700;
+        const nextUuid = () => `00000000-0000-4000-8000-${String(++sequence).padStart(12, "0")}`;
+        const prompt = "Track a synthetic task.";
+        const transcript = yield* ClaudeOrchestratorReplayHarness.decodeTranscript({
+          provider: "claudeAgent",
+          protocol: "claude-agent-sdk.query",
+          version: "1",
+          scenario: "claude_org_fallback",
+          metadata: { nativeSessionId: WAKE_NATIVE_SESSION },
+          entries: [
+            {
+              type: "expect_outbound",
+              frame: {
+                type: "query.open",
+                options: {
+                  model: "claude-opus-5-5",
+                  tools: { type: "preset", preset: "claude_code" },
+                  permissionMode: "bypassPermissions",
+                  allowDangerouslySkipPermissions: true,
+                  settings: { fastMode: false, showThinkingSummaries: true },
+                  sessionId: WAKE_NATIVE_SESSION,
+                },
+              },
+            },
+            {
+              type: "expect_outbound",
+              frame: {
+                type: "prompt.offer",
+                message: {
+                  type: "user",
+                  message: { role: "user", content: prompt },
+                  parent_tool_use_id: null,
+                },
+              },
+            },
+            ...[
+              claudeSdkFrame({
+                type: "system",
+                subtype: "init",
+                model: sdkModel,
+                uuid: nextUuid(),
+                session_id: WAKE_NATIVE_SESSION,
+              }),
+              ...(sdkModel === "claude-sonnet-5-5"
+                ? [
+                    claudeSdkFrame({
+                      type: "system",
+                      subtype: "informational",
+                      level: "warning",
+                      content:
+                        'Model "claude-opus-5-5" is restricted by your organization\'s settings. Using claude-sonnet-5-5 instead.',
+                      uuid: nextUuid(),
+                      session_id: WAKE_NATIVE_SESSION,
+                    }),
+                  ]
+                : []),
+              claudeSdkFrame({
+                ...makeResultFrame({ uuid: nextUuid(), result: "Task recorded." }),
+                modelUsage: {
+                  "claude-haiku-5-5": {
+                    inputTokens: 1994,
+                    outputTokens: 22,
+                    cacheReadInputTokens: 0,
+                    cacheCreationInputTokens: 0,
+                    costUSD: 0,
+                    contextWindow: 200000,
+                    maxOutputTokens: 8192,
+                  },
+                  "claude-sonnet-5-5": {
+                    inputTokens: 22,
+                    outputTokens: 7962,
+                    cacheReadInputTokens: 559622,
+                    cacheCreationInputTokens: 59129,
+                    costUSD: 0,
+                    contextWindow: 200000,
+                    maxOutputTokens: 64000,
+                  },
+                },
+              }),
+            ].map((frame) => ({ type: "emit_inbound" as const, frame })),
+          ],
+        } satisfies ProviderReplayTranscript);
+        const materialized = yield* materializeFixtureInput({
+          scenario: transcript.scenario,
+          fixtureInput: { steps: [{ type: "message", text: prompt }] },
+          driver: ProviderDriverKind.make("claudeAgent"),
+          modelSelection: {
+            ...CLAUDE_MODEL_SELECTION,
+            model: "claude-opus-5-5",
+            options: [{ id: "effort", value: "high" }],
+          },
+        }).pipe(Effect.provide(IdAllocator.layer), provideDeterministicTestRuntime);
+        const scenario = { name: transcript.scenario, transcript, ...materialized };
+        yield* Effect.gen(function* () {
+          const result = yield* runOrchestratorV2Scenario(scenario);
+          assertBaseProjection({ result, transcript, runCount: 1, runStatuses: ["completed"] });
+
+          const projection = projectionFor(result, transcript.scenario);
+          assertSemanticProjectionIntegrity(projection);
+          const run = projection.runs[0];
+          assert(run !== undefined, "Expected a persisted completed run.");
+
+          assert.equal(projection.thread.modelSelection.model, "claude-opus-5-5");
+          assert.equal(run.modelSelection.model, "claude-opus-5-5");
+          assert.equal(projection.providerTurns[0]?.observedModel, expectedObservedModel);
+          assert.equal(run.observedModel, expectedObservedModel);
+
+          const parentId = ThreadId.make("fallback-reporting-parent");
+          const task: OrchestrationV2Subagent = {
+            id: NodeId.make("fallback-reporting-task"),
+            threadId: parentId,
+            runId: null,
+            parentNodeId: NodeId.make("fallback-reporting-parent-node"),
+            origin: "app_owned",
+            createdBy: "agent",
+            driver: ProviderDriverKind.make("claudeAgent"),
+            providerInstanceId: run.providerInstanceId,
+            providerThreadId: run.providerThreadId,
+            childThreadId: projection.thread.id,
+            nativeTaskRef: null,
+            prompt,
+            title: null,
+            model: run.modelSelection.model,
+            status: "completed",
+            result: null,
+            completionDelivery: { state: "disposed", observedByRunId: null },
+            startedAt: run.startedAt,
+            completedAt: run.completedAt,
+            updatedAt: projection.updatedAt,
+          };
+          const parent = {
+            ...projection,
+            thread: { ...projection.thread, id: parentId },
+            runs: [],
+            subagents: [task],
+          };
+          const reportingLayer = OrchestratorMcpService.layer.pipe(
+            Layer.provide(
+              Layer.mergeAll(
+                Layer.mock(ThreadManagementService.ThreadManagementService)({
+                  delegatedTaskResultPending: () => Effect.succeed(false),
+                  getThreadRecords: (id) => Effect.succeed(id === parentId ? parent : projection),
+                }),
+                Layer.mock(ThreadLaunchService.ThreadLaunchService)({}),
+                Layer.mock(GitVcsDriver.GitVcsDriver)({}),
+                Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
+                Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
+                  list: () => Effect.succeed([]),
+                }),
+                Layer.mock(ProjectService.ProjectService)({}),
+                Layer.mock(SecretRequests.SecretRequests)({}),
+                Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+                ServerSettings.layerTest(),
+                NodeServices.layer,
+              ),
+            ),
+          );
+          const report = yield* Effect.gen(function* () {
+            const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+            return yield* service.taskStatus(
+              {
+                environmentId: EnvironmentId.make("fallback-replay"),
+                requestNamespace: "fallback-replay",
+                thread: {
+                  threadId: parentId,
+                  providerSessionId: "fallback-replay",
+                  providerInstanceId: run.providerInstanceId,
+                },
+                client: undefined,
+                capabilities: new Set(["orchestration"]),
+                issuedAt: 1,
+              },
+              task.id,
+            );
+          }).pipe(Effect.provide(reportingLayer));
+
+          assert.equal(report.model, expectedObservedModel ?? "claude-opus-5-5");
+          assert.equal(report.requestedModel, "claude-opus-5-5");
+          assert.equal(report.observedModel, expectedObservedModel);
+          assert.deepEqual(report.options, [{ id: "effort", value: "high" }]);
+
+          const completion = subagentResultForRun(projection, run);
+          if (
+            expectedObservedModel !== undefined &&
+            expectedObservedModel !== run.modelSelection.model
+          ) {
+            assert.include(completion.text, `Provider-reported model: ${expectedObservedModel}`);
+            assert.include(completion.text, "Requested model: claude-opus-5-5");
+          }
+
+          if (sdkModel === "claude-sonnet-5-5") {
+            assert.isTrue(projection.turnItems.some((item) => item.type === "system_notice"));
+            assert.lengthOf(
+              result.domainEvents.filter(
+                (event) =>
+                  event.type === "provider-session.updated" &&
+                  event.payload.model === expectedObservedModel,
+              ),
+              1,
+            );
+          }
+        }).pipe(
+          Effect.provide(layerProviderReplay(scenario, ClaudeOrchestratorReplayHarness)),
+          provideDeterministicTestRuntime,
+          Effect.scoped,
+        );
+      }),
+  );
 
   it.effect("persists a todo_list from inline Claude task-tool frames", () =>
     Effect.gen(function* () {

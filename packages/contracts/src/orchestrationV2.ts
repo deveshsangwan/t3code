@@ -539,6 +539,7 @@ export const OrchestrationV2Run = Schema.Struct({
   ordinal: PositiveInt,
   providerInstanceId: ProviderInstanceId,
   modelSelection: ModelSelection,
+  observedModel: Schema.optional(TrimmedNonEmptyString),
   providerThreadId: Schema.NullOr(ProviderThreadId),
   userMessageId: MessageId,
   rootNodeId: Schema.NullOr(NodeId),
@@ -974,6 +975,7 @@ export const OrchestrationV2ProviderTurn = Schema.Struct({
   nodeId: NodeId,
   runAttemptId: Schema.NullOr(RunAttemptId),
   nativeTurnRef: Schema.NullOr(OrchestrationV2ProviderRef),
+  observedModel: Schema.optional(TrimmedNonEmptyString),
   ordinal: PositiveInt,
   status: Schema.Literals([
     "pending",

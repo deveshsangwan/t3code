@@ -685,11 +685,13 @@ function upsertProviderTurn(
   next: OrchestrationV2ProviderTurn,
 ): Array<OrchestrationV2ProviderTurn> {
   const current = turns.find((turn) => turn.id === next.id);
+  const observedModel = next.observedModel ?? current?.observedModel;
+  const tokenUsage = next.tokenUsage ?? current?.tokenUsage;
+
   return upsertById(turns, {
     ...next,
-    ...((next.tokenUsage ?? current?.tokenUsage) === undefined
-      ? {}
-      : { tokenUsage: next.tokenUsage ?? current?.tokenUsage }),
+    ...(observedModel === undefined ? {} : { observedModel }),
+    ...(tokenUsage === undefined ? {} : { tokenUsage }),
   });
 }
 
@@ -701,6 +703,9 @@ function preserveRunRecordedFields(
   if (current === undefined) return next;
   return {
     ...next,
+    ...(next.observedModel === undefined && current.observedModel !== undefined
+      ? { observedModel: current.observedModel }
+      : {}),
     ...(next.delegatedCompletion === undefined && current.delegatedCompletion !== undefined
       ? { delegatedCompletion: current.delegatedCompletion }
       : {}),
@@ -2040,7 +2045,10 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 requested_at = excluded.requested_at,
                 completed_at = excluded.completed_at,
                 payload_json = ${keepRecordedRunField(
-                  keepRecordedRunField(sql`excluded.payload_json`, "$.delegatedCompletion"),
+                  keepRecordedRunField(
+                    keepRecordedRunField(sql`excluded.payload_json`, "$.observedModel"),
+                    "$.delegatedCompletion",
+                  ),
                   "$.restartCancelledBackgroundWork",
                 )}
             `;

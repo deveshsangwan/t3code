@@ -812,6 +812,9 @@ function threadDetail(
 ): OrchestratorMcpThreadDetail {
   const latest = ThreadManagementService.latestRun(projection);
   const active = ThreadManagementService.latestActiveRun(projection);
+  const modelSelection =
+    latest?.observedModel === undefined ? projection.thread.modelSelection : latest.modelSelection;
+
   return {
     threadId: projection.thread.id,
     projectId: projection.thread.projectId,
@@ -821,8 +824,10 @@ function threadDetail(
     status: active?.status ?? latest?.status ?? "idle",
     latestRunId: latest?.id ?? null,
     activeRunId: active?.id ?? null,
-    providerInstanceId: projection.thread.modelSelection.instanceId,
-    model: projection.thread.modelSelection.model,
+    providerInstanceId: modelSelection.instanceId,
+    model: latest?.observedModel ?? modelSelection.model,
+    requestedModel: modelSelection.model,
+    observedModel: latest?.observedModel,
     runtimeMode: projection.thread.runtimeMode,
     interactionMode: projection.thread.interactionMode,
     linkedPullRequest: projection.thread.linkedPullRequest ?? null,
@@ -858,7 +863,9 @@ function threadRun(run: OrchestrationV2Run): OrchestratorMcpThreadRun {
     ordinal: run.ordinal,
     status: run.status,
     providerInstanceId: run.modelSelection.instanceId,
-    model: run.modelSelection.model,
+    model: run.observedModel ?? run.modelSelection.model,
+    requestedModel: run.modelSelection.model,
+    observedModel: run.observedModel,
     requestedAt: DateTime.formatIso(run.requestedAt),
     startedAt: run.startedAt === null ? null : DateTime.formatIso(run.startedAt),
     completedAt: run.completedAt === null ? null : DateTime.formatIso(run.completedAt),
@@ -1539,7 +1546,9 @@ const make = Effect.gen(function* () {
       workState,
       hasPendingChildRuns: hasPendingChildRuns(childProjection, childRun),
       providerInstanceId: modelSelection.instanceId,
-      model: modelSelection.model,
+      model: childRun?.observedModel ?? modelSelection.model,
+      requestedModel: modelSelection.model,
+      observedModel: childRun?.observedModel,
       options: modelSelection.options ?? [],
       summary: derivedResult,
       resultContextTransferId,
