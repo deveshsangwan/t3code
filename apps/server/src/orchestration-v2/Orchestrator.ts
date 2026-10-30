@@ -4967,6 +4967,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       );
     const restartedRun: OrchestrationV2Run = {
       ...targetRun,
+      observedModel: undefined,
       providerInstanceId: input.modelSelection.instanceId,
       modelSelection: input.modelSelection,
       providerThreadId: restartProviderThread.id,

@@ -12,6 +12,7 @@ import {
   NodeId,
   ProviderThreadId,
   ProviderTurnId,
+  RunAttemptId,
   RunId,
   ThreadId,
   TurnItemId,
@@ -151,6 +152,16 @@ describe("applyOrchestrationV2ProjectionEvent", () => {
 
     expect(next?.runs[0]?.observedModel).toBe("claude-sonnet-5-5");
     expect(next?.runs[0]?.modelSelection).toEqual(run.modelSelection);
+
+    const restarted = applyOrchestrationV2ProjectionEvent(next, {
+      id: EventId.make("event-run-provenance-restart"),
+      type: "run.updated",
+      threadId,
+      runId,
+      occurredAt: now,
+      payload: { ...run, activeAttemptId: RunAttemptId.make("attempt-reducer-new") },
+    });
+    expect(restarted?.runs[0]?.observedModel).toBeUndefined();
   });
 
   it("keeps live token usage when the terminal provider turn omits it", () => {

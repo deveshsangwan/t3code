@@ -242,6 +242,7 @@ function makeRestartAdapter(
                       strength: "strong",
                     },
                     ordinal: input.providerTurnOrdinal,
+                    observedModel: initialSelection.model,
                     status: "running",
                     startedAt: occurredAt,
                     completedAt: null,
@@ -343,6 +344,7 @@ it.live("retries a failed selection restart session open before completing", () 
         yield* worker.drain();
         const activeProjection = yield* orchestrator.getThreadProjection(threadId);
         assert.isTrue(activeProjection.providerTurns.some((turn) => turn.status === "running"));
+        assert.equal(activeProjection.runs[0]?.observedModel, initialSelection.model);
         const activeRunId = activeProjection.runs[0]?.id;
         if (activeRunId === undefined) {
           return yield* Effect.die("active restart test run is missing");
@@ -408,6 +410,7 @@ it.live("retries a failed selection restart session open before completing", () 
       );
       assert.equal(projection.runs.at(-1)?.modelSelection.model, replacementSelection.model);
       assert.equal(projection.runs.at(-1)?.status, "completed");
+      assert.equal(projection.runs.at(-1)?.observedModel, undefined);
       assert.isTrue(captured.failedReplacementOpen);
       assert.equal(captured.closedSessionCount, 0);
       assert.deepEqual(

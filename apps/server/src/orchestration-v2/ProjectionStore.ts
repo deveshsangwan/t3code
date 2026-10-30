@@ -697,7 +697,7 @@ function preserveRunRecordedFields(
   if (current === undefined) return next;
   return {
     ...next,
-    ...(next.observedModel === undefined && current.observedModel !== undefined
+    ...(current.observedModel !== undefined && next.activeAttemptId === current.activeAttemptId
       ? { observedModel: current.observedModel }
       : {}),
     ...(next.delegatedCompletion === undefined && current.delegatedCompletion !== undefined
@@ -881,11 +881,22 @@ export function applyToProjection(
             : base.thread,
         providerThreads: upsertById(base.providerThreads, event.payload),
       };
-    case "provider-turn.updated":
-      return {
-        ...base,
-        providerTurns: upsertProviderTurn(base.providerTurns, event.payload),
-      };
+    case "provider-turn.updated": {
+      const turn = event.payload;
+      const observedModel = turn.observedModel;
+      const runs =
+        observedModel === undefined || turn.tokenUsage !== undefined
+          ? base.runs
+          : base.runs.map((run) =>
+              run.rootNodeId === turn.nodeId &&
+              run.activeAttemptId === turn.runAttemptId &&
+              run.observedModel !== observedModel
+                ? { ...run, observedModel }
+                : run,
+            );
+
+      return { ...base, runs, providerTurns: upsertProviderTurn(base.providerTurns, turn) };
+    }
     case "runtime-request.updated":
       return {
         ...base,
@@ -1839,9 +1850,13 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       OR item.payload_json LIKE '%"viewedImagePath"%'
       OR item.payload_json LIKE '%"toolName":"%delegate_task"%')`;
 
-    const keepRecordedRunField = (payload: Statement.Fragment, path: string) => sql`
+    const keepRecordedRunField = (
+      payload: Statement.Fragment,
+      path: string,
+      condition = sql`json_type(excluded.payload_json, ${path}) IS NULL`,
+    ) => sql`
       CASE
-        WHEN json_type(excluded.payload_json, ${path}) IS NULL
+        WHEN ${condition}
           AND json_type(orchestration_v2_projection_runs.payload_json, ${path}) IS NOT NULL
         THEN json_set(
           ${payload},
@@ -1979,7 +1994,12 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 completed_at = excluded.completed_at,
                 payload_json = ${keepRecordedRunField(
                   keepRecordedRunField(
-                    keepRecordedRunField(sql`excluded.payload_json`, "$.observedModel"),
+                    keepRecordedRunField(
+                      sql`excluded.payload_json`,
+                      "$.observedModel",
+                      sql`json_extract(excluded.payload_json, '$.activeAttemptId') IS
+                          json_extract(orchestration_v2_projection_runs.payload_json, '$.activeAttemptId')`,
+                    ),
                     "$.delegatedCompletion",
                   ),
                   "$.restartCancelledBackgroundWork",
@@ -2353,6 +2373,19 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 completed_at = excluded.completed_at,
                 payload_json = excluded.payload_json
             `;
+              if (
+                event.payload.observedModel !== undefined &&
+                event.payload.tokenUsage === undefined
+              ) {
+                yield* sql`
+                  UPDATE orchestration_v2_projection_runs
+                  SET payload_json = json_set(payload_json, '$.observedModel', ${event.payload.observedModel})
+                  WHERE thread_id = ${event.threadId}
+                    AND json_extract(payload_json, '$.rootNodeId') = ${event.payload.nodeId}
+                    AND json_extract(payload_json, '$.activeAttemptId') IS ${event.payload.runAttemptId}
+                    AND json_extract(payload_json, '$.observedModel') IS NOT ${event.payload.observedModel}
+                `;
+              }
               break;
             }
             case "runtime-request.updated": {

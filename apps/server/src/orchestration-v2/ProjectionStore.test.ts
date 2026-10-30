@@ -1560,6 +1560,101 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
       assert.deepEqual(yield* store.getTurnStartHistory(threadId, [RunId.make("run:other")]), []);
     }),
   );
+  it.effect(
+    "records root model observations without overwriting lifecycle state or another attempt",
+    () =>
+      Effect.gen(function* () {
+        const store = yield* ProjectionStore.ProjectionStoreV2;
+        const threadId = yield* addRolledBackRecoveryCandidate("observed-model-attempt");
+        const now = yield* DateTime.now;
+        const original = (yield* store.getThreadProjection(threadId)).runs[0];
+        assert(original !== undefined && original.rootNodeId !== null);
+        const run = {
+          ...original,
+          activeAttemptId: RunAttemptId.make("attempt-observed-first"),
+          status: "completed" as const,
+          completedAt: now,
+        };
+        yield* store.apply({
+          id: EventId.make("event-observed-completed"),
+          type: "run.updated",
+          threadId,
+          runId: run.id,
+          occurredAt: now,
+          payload: run,
+        });
+        const observation = {
+          id: EventId.make("event-observed-first"),
+          type: "provider-turn.updated" as const,
+          threadId,
+          runId: run.id,
+          occurredAt: now,
+          payload: {
+            id: ProviderTurnId.make("turn-observed-first"),
+            providerThreadId: ProviderThreadId.make("thread-observed-provider"),
+            nodeId: original.rootNodeId,
+            runAttemptId: run.activeAttemptId,
+            nativeTurnRef: null,
+            ordinal: 1,
+            status: "running" as const,
+            observedModel: "claude-sonnet-5-5",
+            startedAt: now,
+            completedAt: null,
+          },
+        };
+        yield* store.apply(observation);
+        const recorded = (yield* store.getThreadProjection(threadId)).runs[0];
+        assert.deepEqual(recorded, { ...run, observedModel: "claude-sonnet-5-5" });
+
+        yield* store.apply({
+          id: EventId.make("event-observed-stale-snapshot"),
+          type: "run.updated",
+          threadId,
+          runId: run.id,
+          occurredAt: now,
+          payload: { ...run, observedModel: "stale-snapshot-model" },
+        });
+        assert.deepEqual((yield* store.getThreadProjection(threadId)).runs[0], {
+          ...run,
+          observedModel: "claude-sonnet-5-5",
+        });
+
+        const restarted = {
+          ...run,
+          status: "starting" as const,
+          completedAt: null,
+          rootNodeId: NodeId.make("node-observed-second"),
+          activeAttemptId: RunAttemptId.make("attempt-observed-second"),
+        };
+        yield* store.apply({
+          id: EventId.make("event-observed-restart"),
+          type: "run.updated",
+          threadId,
+          runId: run.id,
+          occurredAt: now,
+          payload: restarted,
+        });
+        yield* store.apply({ ...observation, id: EventId.make("event-observed-late-first") });
+        assert.deepEqual((yield* store.getThreadProjection(threadId)).runs[0], restarted);
+
+        yield* store.apply({
+          ...observation,
+          id: EventId.make("event-observed-second"),
+          payload: {
+            ...observation.payload,
+            id: ProviderTurnId.make("turn-observed-second"),
+            ordinal: 2,
+            nodeId: restarted.rootNodeId,
+            runAttemptId: restarted.activeAttemptId,
+            observedModel: "claude-opus-5-5",
+          },
+        });
+        assert.deepEqual((yield* store.getThreadProjection(threadId)).runs[0], {
+          ...restarted,
+          observedModel: "claude-opus-5-5",
+        });
+      }),
+  );
   it.effect("preserves stored provider usage when a terminal update omits it", () =>
     Effect.gen(function* () {
       const projectionStore = yield* ProjectionStore.ProjectionStoreV2;

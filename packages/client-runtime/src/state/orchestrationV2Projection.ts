@@ -301,7 +301,8 @@ export function applyOrchestrationV2ProjectionEvent(
     case "run.updated": {
       const current = base.runs.find((run) => run.id === event.payload.id);
       const payload =
-        event.payload.observedModel === undefined && current?.observedModel !== undefined
+        current?.observedModel !== undefined &&
+        event.payload.activeAttemptId === current.activeAttemptId
           ? { ...event.payload, observedModel: current.observedModel }
           : event.payload;
       const next = { ...base, runs: upsertEntity(base.runs, payload) };
@@ -357,8 +358,20 @@ export function applyOrchestrationV2ProjectionEvent(
       const observedModel = event.payload.observedModel ?? current?.observedModel;
       const tokenUsage = event.payload.tokenUsage ?? current?.tokenUsage;
 
+      const runs =
+        event.payload.observedModel === undefined || event.payload.tokenUsage !== undefined
+          ? base.runs
+          : base.runs.map((run) =>
+              run.rootNodeId === event.payload.nodeId &&
+              run.activeAttemptId === event.payload.runAttemptId &&
+              run.observedModel !== event.payload.observedModel
+                ? { ...run, observedModel: event.payload.observedModel }
+                : run,
+            );
+
       return {
         ...base,
+        runs,
         providerTurns: upsertEntity(base.providerTurns, {
           ...event.payload,
           ...(observedModel === undefined ? {} : { observedModel }),
