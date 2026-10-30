@@ -3,6 +3,7 @@ import { describe, expect, it } from "@effect/vitest";
 import {
   CommandId,
   EnvironmentId,
+  EventId,
   isProviderNativeSubagentThread,
   MessageId,
   type ModelSelection,
@@ -16,10 +17,12 @@ import {
   type ServerProvider,
   ThreadId,
 } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { McpSchema, McpServer } from "effect/ai";
@@ -27,12 +30,14 @@ import { McpSchema, McpServer } from "effect/ai";
 import { CodexOrchestratorReplayHarness } from "../orchestration-v2/Adapters/CodexAdapterV2.testkit.ts";
 import * as CommandReceiptStore from "../orchestration-v2/CommandReceiptStore.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
+import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
+import { makeProviderReplayGate } from "@t3tools/provider-testing/replayGate";
 import { checkpointWorkspace } from "@t3tools/provider-testing/replayWorkspace";
 import * as ProviderReplayHarness from "../orchestration-v2/testkit/ProviderReplayHarness.ts";
 import {
@@ -193,12 +198,22 @@ const layerUnusedScheduledTaskStub = Layer.succeed(
 
 describe("orchestrator MCP toolkit", () => {
   it.live.each([
-    { label: "distinct", result: queuedFollowupResult, latestSummary: queuedFollowupResult },
-    { label: "identical", result: delegatedResult, latestSummary: null },
-  ])("reports $label child results", ({ result, latestSummary }) =>
+    {
+      label: "distinct",
+      result: queuedFollowupResult,
+      latestSummary: queuedFollowupResult,
+      observedModel: "provider-reported-model",
+    },
+    { label: "identical", result: delegatedResult, latestSummary: null, observedModel: undefined },
+  ])("reports $label child results", ({ result, latestSummary, observedModel }) =>
     Effect.scoped(
       Effect.gen(function* () {
         const cwd = yield* checkpointWorkspace("delegated-task-status");
+        const replayGate = makeProviderReplayGate(["child.original.item/started"]);
+        yield* Effect.addFinalizer(() => Effect.sync(() => replayGate.releaseAll()));
+        const delegatedSummary = observedModel
+          ? `Requested model: ${codexModel}. Provider-reported model: ${observedModel}.\n\n${delegatedResult}`
+          : delegatedResult;
         const rawTranscript = yield* readDelegatedTaskStatusTranscript(result);
         const transcript = yield* CodexOrchestratorReplayHarness.decodeTranscript(
           materializeReplayTranscriptWorkspace(rawTranscript, cwd),
@@ -211,6 +226,7 @@ describe("orchestrator MCP toolkit", () => {
             runtimePolicyOverride: { cwd },
           },
           CodexOrchestratorReplayHarness,
+          { replayGate },
         );
         const layerOrchestration = Layer.merge(
           layerOrchestrator,
@@ -233,9 +249,9 @@ describe("orchestrator MCP toolkit", () => {
           Layer.provideMerge(McpServer.McpServer.layer),
           Layer.provideMerge(layerOrchestration),
           Layer.provide(
-            CodexOrchestratorReplayHarness.makeProviderAdapterRegistryLayer(transcript).pipe(
-              Layer.provide(McpProviderSessions.layer),
-            ),
+            CodexOrchestratorReplayHarness.makeProviderAdapterRegistryLayer(transcript, {
+              replayGate,
+            }).pipe(Layer.provide(McpProviderSessions.layer)),
           ),
           Layer.provide(layerProviderRegistry),
           Layer.provide(ServerSettings.layerTest()),
@@ -337,7 +353,55 @@ describe("orchestrator MCP toolkit", () => {
           const delegatedStart = yield* decodeDelegateTaskResult(
             delegatedCall.structuredContent,
           ).pipe(Effect.orDie);
-          expect(delegatedStart.childRunId).not.toBeNull();
+          const childRunId = delegatedStart.childRunId;
+          if (childRunId === null) {
+            return yield* Effect.die("Delegation did not create a child run.");
+          }
+
+          expect(
+            yield* Effect.promise(() => replayGate.waitForReached("child.original.item/started")),
+          ).toBe(true);
+          if (observedModel) {
+            const childThreadId = localChild(delegatedStart.childThreadId);
+            const startedTurn = yield* orchestrator
+              .streamStoredEventsFrom({
+                threadId: childThreadId,
+                afterSequence: 0,
+              })
+              .pipe(
+                Stream.filterMap((stored) =>
+                  stored.event.type === "provider-turn.updated" &&
+                  stored.event.runId === childRunId &&
+                  stored.event.payload.status === "running"
+                    ? Result.succeed(stored.event.payload)
+                    : Result.failVoid,
+                ),
+                Stream.runHead,
+              );
+            if (Option.isNone(startedTurn)) {
+              return yield* Effect.die("Delegated child provider turn did not start.");
+            }
+
+            const providerTurn = startedTurn.value;
+            // This Codex fixture tests completion from normalized telemetry; Claude SDK capture has its own replay.
+            const sink = yield* EventSink.EventSinkV2;
+            yield* sink.write({
+              events: [
+                {
+                  id: EventId.make("event:mcp-replay-observed-model"),
+                  type: "provider-turn.updated",
+                  threadId: childThreadId,
+                  runId: childRunId,
+                  nodeId: providerTurn.nodeId,
+                  driver: ProviderDriverKind.make("codex"),
+                  providerInstanceId: codexInstanceId,
+                  occurredAt: yield* DateTime.now,
+                  payload: { ...providerTurn, observedModel },
+                },
+              ],
+            });
+          }
+          replayGate.release("child.original.item/started");
           yield* orchestrator
             .streamStoredEventsFrom({
               threadId: parentThreadId,
@@ -367,7 +431,7 @@ describe("orchestrator MCP toolkit", () => {
           ).pipe(Effect.orDie);
           expect(delegated).toMatchObject({
             status: "completed",
-            summary: delegatedResult,
+            summary: delegatedSummary,
             providerInstanceId: codexInstanceId,
             hasPendingChildRuns: false,
             latestTerminalRunId: delegated.childRunId,
@@ -376,6 +440,14 @@ describe("orchestrator MCP toolkit", () => {
             latestTerminalResultContextTransferId: null,
           });
           expect(delegated.resultContextTransferId).not.toBeNull();
+          const completedParent = yield* orchestrator.getThreadProjection(parentThreadId);
+          expect(
+            completedParent.subagents.find((task) => task.id === delegated.taskId),
+          ).toMatchObject({
+            status: "completed",
+            model: observedModel ?? codexModel,
+            result: delegatedSummary,
+          });
 
           const delegatedChild = yield* orchestrator.getThreadProjection(
             localChild(delegated.childThreadId),
@@ -466,7 +538,7 @@ describe("orchestrator MCP toolkit", () => {
           expect(pendingStatus).toMatchObject({
             childRunId: delegated.childRunId,
             status: "completed",
-            summary: delegatedResult,
+            summary: delegatedSummary,
             resultContextTransferId: delegated.resultContextTransferId,
             hasPendingChildRuns: true,
             latestTerminalRunId: delegated.childRunId,
@@ -579,7 +651,7 @@ describe("orchestrator MCP toolkit", () => {
           expect(finalStatus).toMatchObject({
             childRunId: delegated.childRunId,
             status: "completed",
-            summary: delegatedResult,
+            summary: delegatedSummary,
             resultContextTransferId: delegated.resultContextTransferId,
             hasPendingChildRuns: false,
             latestTerminalRunId: queuedFollowup.runId,

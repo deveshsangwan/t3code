@@ -108,7 +108,6 @@ import type * as ProviderContinuationRequests from "@t3tools/provider-core/serve
 import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 import * as ClaudeAdapterV2 from "./ClaudeAdapterV2.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
-import { subagentResultForRun } from "@t3tools/provider-core/server/subagentProjection";
 import { ClaudeOrchestratorReplayHarness } from "./ClaudeAdapterV2.testkit.ts";
 import { provideDeterministicTestRuntime } from "../testkit/DeterministicRuntime.ts";
 import { runOrchestratorV2Scenario } from "../testkit/OrchestratorScenario.ts";
@@ -7194,6 +7193,10 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           assert.equal(projection.providerTurns[0]?.observedModel, expectedObservedModel);
           assert.equal(run.observedModel, expectedObservedModel);
 
+          if (sdkModel !== "claude-sonnet-5-5") {
+            return;
+          }
+
           const parentId = ThreadId.make("fallback-reporting-parent");
           const task: OrchestrationV2Subagent = {
             id: NodeId.make("fallback-reporting-task"),
@@ -7269,26 +7272,15 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           assert.equal(report.observedModel, expectedObservedModel);
           assert.deepEqual(report.options, [{ id: "effort", value: "high" }]);
 
-          const completion = subagentResultForRun(projection, run);
-          if (
-            expectedObservedModel !== undefined &&
-            expectedObservedModel !== run.modelSelection.model
-          ) {
-            assert.include(completion.text, `Provider-reported model: ${expectedObservedModel}`);
-            assert.include(completion.text, "Requested model: claude-opus-5-5");
-          }
-
-          if (sdkModel === "claude-sonnet-5-5") {
-            assert.isTrue(projection.turnItems.some((item) => item.type === "system_notice"));
-            assert.lengthOf(
-              result.domainEvents.filter(
-                (event) =>
-                  event.type === "provider-session.updated" &&
-                  event.payload.model === expectedObservedModel,
-              ),
-              1,
-            );
-          }
+          assert.isTrue(projection.turnItems.some((item) => item.type === "system_notice"));
+          assert.lengthOf(
+            result.domainEvents.filter(
+              (event) =>
+                event.type === "provider-session.updated" &&
+                event.payload.model === expectedObservedModel,
+            ),
+            1,
+          );
         }).pipe(
           Effect.provide(layerProviderReplay(scenario, ClaudeOrchestratorReplayHarness)),
           provideDeterministicTestRuntime,

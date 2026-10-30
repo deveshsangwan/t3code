@@ -356,42 +356,64 @@ it("exposes the provider failure rather than a progress message from the failed 
   assert.isNull(result.messageId);
 });
 
-it("orders a task's assistant messages by turn item, not by timestamps", () => {
-  const { projection, run } = taskFixture();
-  const at = DateTime.makeUnsafe("2026-07-24T10:05:00.000Z");
-  const message = (id: string, text: string, ordinal: number) => {
-    const artifacts = makeSubagentConversationArtifacts({
-      messageId: MessageId.make(id),
-      turnItemId: TurnItemId.make(id),
-      threadId: parentThreadId,
-      rootNodeId: NodeId.make("root"),
-      providerThreadId: null,
-      providerTurnId: null,
-      nativeItemRef: null,
-      role: "assistant",
-      text,
-      ordinal,
-      now: at,
-    });
-    return {
-      message: { ...artifacts.message, runId: run.id },
-      turnItem: { ...artifacts.turnItem, runId: run.id },
+it.each([
+  { requestedModel: "claude-opus-4-1", observedModel: undefined, provenance: "" },
+  { requestedModel: "claude-opus-4-1", observedModel: "claude-opus-4-1", provenance: "" },
+  {
+    requestedModel: "claude-opus-5-5",
+    observedModel: "claude-sonnet-5-5",
+    provenance: "Requested model: claude-opus-5-5. Provider-reported model: claude-sonnet-5-5.\n\n",
+  },
+  {
+    requestedModel: "opus",
+    observedModel: "claude-opus-4-1",
+    provenance: "Requested model: opus. Provider-reported model: claude-opus-4-1.\n\n",
+  },
+  {
+    requestedModel: "claude-opus-4-1",
+    observedModel: "claude-opus-4-1[1m]",
+    provenance:
+      "Requested model: claude-opus-4-1. Provider-reported model: claude-opus-4-1[1m].\n\n",
+  },
+])(
+  "orders assistant messages and reports $requestedModel / $observedModel provenance",
+  ({ requestedModel, observedModel, provenance }) => {
+    const { projection, run } = taskFixture();
+    const at = DateTime.makeUnsafe("2026-07-24T10:05:00.000Z");
+    const message = (id: string, text: string, ordinal: number) => {
+      const artifacts = makeSubagentConversationArtifacts({
+        messageId: MessageId.make(id),
+        turnItemId: TurnItemId.make(id),
+        threadId: parentThreadId,
+        rootNodeId: NodeId.make("root"),
+        providerThreadId: null,
+        providerTurnId: null,
+        nativeItemRef: null,
+        role: "assistant",
+        text,
+        ordinal,
+        now: at,
+      });
+      return {
+        message: { ...artifacts.message, runId: run.id },
+        turnItem: { ...artifacts.turnItem, runId: run.id },
+      };
     };
-  };
-  const progress = message("progress", "Starting step 0.", 1);
-  const report = message("report", "All steps passed.", 2);
-  const result = subagentResultForRun(
-    {
-      ...projection,
-      messages: [progress.message, report.message],
-      turnItems: [report.turnItem, progress.turnItem],
-    },
-    run,
-  );
-  assert.equal(result.text, "All steps passed.");
-  assert.equal(result.messageId, report.message.id);
-  assert.equal(result.turnItemId, report.turnItem.id);
-});
+    const progress = message("progress", "Starting step 0.", 1);
+    const report = message("report", "All steps passed.", 2);
+    const result = subagentResultForRun(
+      {
+        ...projection,
+        messages: [progress.message, report.message],
+        turnItems: [report.turnItem, progress.turnItem],
+      },
+      { ...run, modelSelection: { ...run.modelSelection, model: requestedModel }, observedModel },
+    );
+    assert.equal(result.text, `${provenance}All steps passed.`);
+    assert.equal(result.messageId, report.message.id);
+    assert.equal(result.turnItemId, report.turnItem.id);
+  },
+);
 
 it.effect("ends an orphaned native subagent's node when only its record already ended", () =>
   Effect.gen(function* () {

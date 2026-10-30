@@ -2415,7 +2415,10 @@ describe("OrchestratorMcpService provider resolution", () => {
       }),
     );
   });
-  it.effect("reports observed fallback separately from requested child configuration", () =>
+  it.effect.each([
+    { phase: "after restart", hasRun: true },
+    { phase: "before launch", hasRun: false },
+  ])("reports the child selection $phase with execution provenance when available", ({ hasRun }) =>
     Effect.gen(function* () {
       const runSelection = {
         instanceId: ProviderInstanceId.make("claudeAgent-personal"),
@@ -2477,7 +2480,7 @@ describe("OrchestratorMcpService provider resolution", () => {
       const childWithRun = {
         ...child,
         thread: { ...child.thread, modelSelection: threadSelection },
-        runs: [run],
+        runs: hasRun ? [run] : [],
       };
       const dependencies = Layer.mergeAll(
         NodeServices.layer,
@@ -2496,86 +2499,17 @@ describe("OrchestratorMcpService provider resolution", () => {
         const service = yield* OrchestratorMcpService.OrchestratorMcpService;
         const result = yield* service.taskStatus(scope, taskId);
 
-        assert.equal(result.providerInstanceId, runSelection.instanceId);
-        assert.equal(result.model, run.observedModel);
-        assert.equal(result.requestedModel, runSelection.model);
-        assert.equal(result.observedModel, run.observedModel);
-        assert.deepEqual(result.options, runSelection.options);
+        const selection = hasRun ? runSelection : threadSelection;
+        const observedModel = hasRun ? run.observedModel : undefined;
+
+        assert.equal(result.providerInstanceId, selection.instanceId);
+        assert.equal(result.model, observedModel ?? selection.model);
+        assert.equal(result.requestedModel, selection.model);
+        assert.equal(result.observedModel, observedModel);
+        assert.deepEqual(result.options, selection.options);
       }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(dependencies))));
     }),
   );
-  it.effect(
-    "reports the child run's selection after a restart and the thread selection before launch",
-    () =>
-      Effect.gen(function* () {
-        const runSelection = {
-          instanceId: ProviderInstanceId.make("claudeAgent-personal"),
-          model: "claude-opus-4-6",
-          options: [
-            { id: "effort", value: "max" },
-            { id: "fastMode", value: true },
-          ],
-        } as const;
-        const threadSelection = {
-          instanceId: codexInstanceId,
-          model: "gpt-5.4",
-          options: [{ id: "reasoningEffort", value: "high" }],
-        } as const;
-        let hasRun = true;
-        const task = {
-          id: taskId,
-          threadId: parentThreadId,
-          origin: "app_owned",
-          childThreadId,
-          providerInstanceId: ProviderInstanceId.make("claudeAgent-work"),
-          model: "claude-sonnet-4-6",
-          status: "running",
-          result: null,
-        };
-        const dependencies = Layer.mergeAll(
-          NodeServices.layer,
-          Layer.mock(ThreadManagementService.ThreadManagementService)({
-            getThreadRecords: (threadId) =>
-              Effect.succeed(
-                threadId === parentThreadId
-                  ? parentProjection([task])
-                  : ({
-                      ...childProjection,
-                      thread: { ...childProjection.thread, modelSelection: threadSelection },
-                      runs: hasRun
-                        ? [
-                            {
-                              id: RunId.make("run:mcp-restarted-child"),
-                              ordinal: 1,
-                              status: "running",
-                              modelSelection: runSelection,
-                            },
-                          ]
-                        : [],
-                    } as unknown as OrchestrationV2ThreadProjection),
-              ),
-          }),
-          ServerSettings.layerTest(),
-          providerRegistryLayer([]),
-          adapterRegistryLayer([]),
-          Layer.mock(ProjectService.ProjectService)({}),
-          Layer.mock(SecretRequests.SecretRequests)({}),
-          Layer.mock(RemoteDelegation.RemoteDelegation)({}),
-          Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
-        );
-        yield* Effect.gen(function* () {
-          const service = yield* OrchestratorMcpService.OrchestratorMcpService;
-          for (const selection of [runSelection, threadSelection]) {
-            const result = yield* service.taskStatus(scope, taskId);
-            assert.equal(result.providerInstanceId, selection.instanceId);
-            assert.equal(result.model, selection.model);
-            assert.deepEqual(result.options, selection.options);
-            hasRun = false;
-          }
-        }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(dependencies))));
-      }),
-  );
-
   it.effect(
     "inherits delegated options, merges overrides, and resets on explicit clearing or a new target",
     () =>

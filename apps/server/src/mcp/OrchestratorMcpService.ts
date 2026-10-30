@@ -791,7 +791,7 @@ function threadDetail(
   const latest = ThreadManagementService.latestRun(projection);
   const active = ThreadManagementService.latestActiveRun(projection);
   const modelSelection =
-    latest?.observedModel === undefined ? projection.thread.modelSelection : latest.modelSelection;
+    latest?.observedModel == null ? projection.thread.modelSelection : latest.modelSelection;
 
   return {
     threadId: projection.thread.id,
@@ -806,7 +806,7 @@ function threadDetail(
     providerInstanceId: modelSelection.instanceId,
     model: latest?.observedModel ?? modelSelection.model,
     requestedModel: modelSelection.model,
-    observedModel: latest?.observedModel,
+    ...(latest?.observedModel == null ? {} : { observedModel: latest.observedModel }),
     runtimeMode: projection.thread.runtimeMode,
     interactionMode: projection.thread.interactionMode,
     linkedPullRequest: projection.thread.linkedPullRequest ?? null,
@@ -844,7 +844,7 @@ function threadRun(run: OrchestrationV2Run): OrchestratorMcpThreadRun {
     providerInstanceId: run.modelSelection.instanceId,
     model: run.observedModel ?? run.modelSelection.model,
     requestedModel: run.modelSelection.model,
-    observedModel: run.observedModel,
+    ...(run.observedModel == null ? {} : { observedModel: run.observedModel }),
     requestedAt: DateTime.formatIso(run.requestedAt),
     startedAt: run.startedAt === null ? null : DateTime.formatIso(run.startedAt),
     completedAt: run.completedAt === null ? null : DateTime.formatIso(run.completedAt),
@@ -1544,7 +1544,7 @@ const make = Effect.gen(function* () {
       providerInstanceId: modelSelection.instanceId,
       model: childRun?.observedModel ?? modelSelection.model,
       requestedModel: modelSelection.model,
-      observedModel: childRun?.observedModel,
+      ...(childRun?.observedModel == null ? {} : { observedModel: childRun.observedModel }),
       options: modelSelection.options ?? [],
       summary: derivedResult,
       resultContextTransferId,
