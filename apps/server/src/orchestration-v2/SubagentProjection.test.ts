@@ -8,6 +8,7 @@ import {
   EventId,
   TurnItemId,
   type OrchestrationV2Run,
+  type OrchestrationV2TurnItem,
   type OrchestrationV2AppThread,
   ProjectId,
   ProviderInstanceId,
@@ -357,27 +358,42 @@ it("exposes the provider failure rather than a progress message from the failed 
 });
 
 it.each([
-  { requestedModel: "claude-opus-4-1", observedModel: undefined, provenance: "" },
-  { requestedModel: "claude-opus-4-1", observedModel: "claude-opus-4-1", provenance: "" },
+  {
+    requestedModel: "claude-opus-4-1",
+    observedModel: undefined,
+    fallbackNotice: null,
+    provenance: "",
+  },
+  {
+    requestedModel: "claude-opus-4-1",
+    observedModel: "claude-opus-4-1",
+    fallbackNotice: null,
+    provenance: "",
+  },
   {
     requestedModel: "claude-opus-5-5",
     observedModel: "claude-sonnet-5-5",
-    provenance: "Requested model: claude-opus-5-5. Provider-reported model: claude-sonnet-5-5.\n\n",
+    fallbackNotice:
+      'Model "claude-opus-5-5" is restricted by your organization\'s settings. Using claude-sonnet-5-5 instead.',
+    provenance:
+      'Requested model: claude-opus-5-5. Provider-reported model: claude-sonnet-5-5.\nProvider notice: Model "claude-opus-5-5" is restricted by your organization\'s settings. Using claude-sonnet-5-5 instead.\n\n',
   },
   {
     requestedModel: "opus",
     observedModel: "claude-opus-4-1",
+    fallbackNotice: null,
     provenance: "Requested model: opus. Provider-reported model: claude-opus-4-1.\n\n",
   },
   {
     requestedModel: "claude-opus-4-1",
     observedModel: "claude-opus-4-1[1m]",
+    fallbackNotice: null,
     provenance:
       "Requested model: claude-opus-4-1. Provider-reported model: claude-opus-4-1[1m].\n\n",
   },
 ])(
   "orders assistant messages and reports $requestedModel / $observedModel provenance",
-  ({ requestedModel, observedModel, provenance }) => {
+  ({ requestedModel, observedModel, fallbackNotice, provenance }) => {
     const { projection, run } = taskFixture();
     const at = DateTime.makeUnsafe("2026-07-24T10:05:00.000Z");
     const message = (id: string, text: string, ordinal: number) => {
@@ -401,11 +417,51 @@ it.each([
     };
     const progress = message("progress", "Starting step 0.", 1);
     const report = message("report", "All steps passed.", 2);
+
+    const notice = {
+      id: TurnItemId.make("fallback-notice"),
+      threadId: run.threadId,
+      runId: run.id,
+      nodeId: run.rootNodeId,
+      providerThreadId: null,
+      providerTurnId: null,
+      nativeItemRef: null,
+      parentItemId: null,
+      ordinal: 0,
+      type: "system_notice",
+      status: "completed",
+      title: null,
+      message: fallbackNotice ?? "",
+      startedAt: at,
+      completedAt: at,
+      updatedAt: at,
+    } satisfies OrchestrationV2TurnItem;
+    const notices = [
+      {
+        ...notice,
+        id: TurnItemId.make("other-run"),
+        runId: RunId.make("other"),
+        message: "Other run notice",
+      },
+      {
+        ...notice,
+        id: TurnItemId.make("other-root"),
+        nodeId: NodeId.make("previous-root"),
+        message: "Previous attempt notice",
+      },
+      {
+        ...notice,
+        id: TurnItemId.make("native-child"),
+        parentItemId: TurnItemId.make("native-task"),
+        message: "Native child notice",
+      },
+      notice,
+    ];
     const result = subagentResultForRun(
       {
         ...projection,
         messages: [progress.message, report.message],
-        turnItems: [report.turnItem, progress.turnItem],
+        turnItems: [report.turnItem, ...notices, progress.turnItem],
       },
       { ...run, modelSelection: { ...run.modelSelection, model: requestedModel }, observedModel },
     );

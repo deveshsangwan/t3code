@@ -214,11 +214,32 @@ export function subagentResultForRun(
     (run.status === "completed"
       ? "Child task completed without an assistant result."
       : `Child task ended with status ${run.status}.`);
+
+  const hasModelMismatch =
+    run.observedModel != null && run.observedModel !== run.modelSelection.model;
+  const providerNotices = hasModelMismatch
+    ? projection.turnItems
+        .filter(
+          (item): item is Extract<OrchestrationV2TurnItem, { readonly type: "system_notice" }> =>
+            item.type === "system_notice" &&
+            item.runId === run.id &&
+            run.rootNodeId !== null &&
+            item.nodeId === run.rootNodeId &&
+            item.parentItemId === null &&
+            item.message.trim().length > 0,
+        )
+        .toSorted((left, right) => left.ordinal - right.ordinal)
+        .map((item) => `Provider notice: ${item.message.trim()}`)
+    : [];
+  const provenance = hasModelMismatch
+    ? [
+        `Requested model: ${run.modelSelection.model}. Provider-reported model: ${run.observedModel}.`,
+        ...providerNotices,
+      ].join("\n") + "\n\n"
+    : "";
+
   return {
-    text:
-      run.observedModel !== undefined && run.observedModel !== run.modelSelection.model
-        ? `Requested model: ${run.modelSelection.model}. Provider-reported model: ${run.observedModel}.\n\n${text}`
-        : text,
+    text: `${provenance}${text}`,
     messageId: failure === undefined ? (message?.id ?? turnItem?.messageId ?? null) : null,
     turnItemId: failure?.id ?? turnItem?.id ?? null,
   };
